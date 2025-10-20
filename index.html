@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Visualisasi Project</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+<script>
+        // Konfigurasi API
+        const API_BASE_URL = 'http://localhost:3000';
+        
+        let allData = {};
+        let filteredData = {};
+        let activeItemId = null;
+
+        // Load data dari API
+        async function loadData() {
+            const statusEl = document.getElementById('apiStatus');
+            try {
+                statusEl.textContent = '🔄 Memuat data dari database...';
+                statusEl.className = 'api-status loading';
+                
+                const response = await fetch(`${API_BASE_URL}/api/visualization-data`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const result = await response.json();
+                
+                if (!result.success) {
+                    throw new Error(result.error || 'Gagal mengambil data');
+                }
+                
+                allData = result.data;
+                filteredData = JSON.parse(JSON.stringify(allData));
+                
+                initYearFilter();
+                renderChart();
+                
+                statusEl.textContent = `✅ Berhasil memuat ${allData.projects.length} projects dan ${allData.researchers.length} researchers`;
+                statusEl.className = 'api-status success';
+                
+                console.log('✅ Data loaded successfully:', allData);
+                
+            } catch (error) {
+                console.error('❌ Error loading data:', error);
+                statusEl.textContent = `❌ Gagal memuat data: ${error.message}`;
+                statusEl.className = 'api-status error';
+                
+                // Tampilkan pesan error di chart container
+                d3.select("#chart-container")
+                    .html(`
+                        <div class="no-results">
+                            <div class="no-results-icon">⚠️</div>
+                            <div class="no-results-text">
+                                Gagal memuat data dari database<br>
+                                <small style="color:#999;margin-top:10px;display:block;">
+                                    ${error.message}<br><br>
+                                    Pastikan API server sudah berjalan di ${API_BASE_URL}
+                                </small>
+                            </div>
+                        </div>
+                    `);
+            }
+        }
+
+        function initYearFilter() {
+            const years = [...new Set(allData.projects.map(p => p.year))].sort((a, b) => b - a);
+            const select = document.getElementById('yearFilter');
+            while (select.options.length > 1) select.remove(1);
+            years.forEach(year => {
+                const option = document.createElement('option');
+                option.value = year;
+                option.textContent = year;
+                select.appendChild(option);
+            });
+        }
+
+        function filterData() {
+            const yearFilter = document.getElementById('yearFilter').value;
+            const searchQuery = document.getElementById('searchInput').value.toLowerCase();
+
+            filteredData.projects = allData.projects.filter(p => {
+                const matchYear = yearFilter === 'all' || p.year.toString() === yearFilter;
+                const matchSearch = p.name.toLowerCase().includes(searchQuery) || p.detail.toLowerCase().includes(searchQuery);
+                return matchYear && matchSearch;
+            });
+
+            const activeResearcherIds = new Set();
+            filteredData.projects.forEach(p => {
+                p.researchers.forEach(rId => activeResearcherIds.add(rId));
+            });
+
+            filteredData.researchers = allData.researchers.filter(r => {
+                const matchSearch = r.name.toLowerCase().includes(searchQuery) || r.expertise.toLowerCase().includes(searchQuery);
+                const hasProjects = activeResearcherIds.has(r.id);
+                if (searchQuery && matchSearch) return true;
+                return hasProjects;
+            });
+
+            filteredData.researchers.forEach(r => {
+                r.projects = r.projects.filter(pId => filteredData.projects.some(p => p.id === pId));
+            });
+
+            renderChart();
+            updateActiveHighlight();
+        }
+
+        function wrapText(text, width) {
+            const words = text.split(' ');
+            const lines = [];
+            let currentLine = words[0];
+            for (let i = 1; i < words.length; i++) {
+                const testLine = currentLine + ' ' + words[i];
+                if (testLine.length * 6.5 < width) {
+                    currentLine = testLine;
+                } else {
+                    lines.push(currentLine);
+                    currentLine = words[i];
+                }
+            }
+            lines.push(currentLine);
+            return lines;
+        }
+
+        function renderChart() {
+            d3.select("#chart-container svg").remove();
+            d3.select("#chart-container .no-results").remove();
+
+            if (filteredData.projects.length === 0 && filteredData.researchers.length === 0) {
+                d3.select("#chart-container")
+                    .append("div")
+                    .attr("class", "no-results")
+                    .html(`
+                        <div class="no-results-icon">🔍</div>
+                        <div class="no-results-text">Tidak ada data yang sesuai dengan filter</div>
+                    `);
+                return;
+            }
+
+            const margin = {top: 80, right: 700, bottom: 50, left: 300};
+            const container = document.getElementById('chart-container');
+            const availableWidth = container.clientWidth - margin.left - margin.right;
+            const width = Math.max(availableWidth, 300);
+            
+            const itemHeight = 50;
+            const maxItems = Math.max(filteredData.projects.length, filteredData.researchers.length);
+            const height = maxItems * itemHeight + 80;
+
+            const svg = d3.select("#chart-container")
+                .append("svg")
+                .attr("width", width + margin.left + margin.right)
+                .attr("height", height + margin.top + margin.bottom)
+                .append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+
+            const projectX = 0;
+            const researcherX = width;
+
+            filteredData.projects.forEach((p, i) => {
+                p.y = (i + 1) * itemHeight;
+                p.x = projectX;
+            });
+
+            filteredData.researchers.forEach((r, i) => {
+                r.y = (i + 1) * itemHeight;
+                r.x = researcherX;
+            });
+
+            const connections = [];
+            filteredData.projects.forEach(project => {
+                project.researchers.forEach(researcherId => {
+                    const researcher = filteredData.researchers.find(r => r.id === researcherId);
+                    if (researcher) {
+                        connections.push({
+                            source: project,
+                            target: researcher,
+                            projectId: project.id,
+                            researcherId: researcher.id
+                        });
+                    }
+                });
+            });
+
+            const lines = svg.selectAll(".connection-line").data(connections).enter().append("line")
+                .attr("class", "connection-line")
+                .attr("x1", d => d.source.x)
+                .attr("y1", d => d.source.y)
+                .attr("x2", d => d.target.x)
+                .attr("y2", d => d.target.y)
+                .on("click", function(event, d) {
+                    showProjectSidebar(d.source);
+                });
+
+            svg.append("text").attr("class", "column-header").attr("x", projectX).attr("y", -30).attr("text-anchor", "middle").text(`PROJECTS (${filteredData.projects.length})`);
+            svg.append("text").attr("class", "column-header").attr("x", researcherX).attr("y", -30).attr("text-anchor", "middle").text(`RESEARCHERS (${filteredData.researchers.length})`);
+
+            const projectNodes = svg.selectAll(".project-node").data(filteredData.projects).enter().append("g")
+                .attr("class", "project-node")
+                .on("mouseenter", function(event, d) { highlightConnections(d.id, 'project'); })
+                .on("mouseleave", function() { if (!activeItemId) resetConnections(); })
+                .on("click", function(event, d) { showProjectSidebar(d); });
+
+            projectNodes.append("circle").attr("class", "node-circle").attr("cx", d => d.x).attr("cy", d => d.y).attr("r", 6).attr("fill", "#c92a2a");
+            projectNodes.append("text").attr("class", "node-label").attr("x", d => d.x - 15).attr("y", d => d.y).attr("text-anchor", "end")
+                .each(function(d) {
+                    const lines = wrapText(d.name, 140);
+                    const text = d3.select(this);
+                    lines.forEach((line, i) => {
+                        text.append("tspan").attr("x", d.x - 15).attr("dy", i === 0 ? -((lines.length - 1) * 7) : 14).text(line);
+                    });
+                });
+
+            const researcherNodes = svg.selectAll(".researcher-node").data(filteredData.researchers).enter().append("g")
+                .attr("class", "researcher-node")
+                .on("mouseenter", function(event, d) { highlightConnections(d.id, 'researcher'); })
+                .on("mouseleave", function() { if (!activeItemId) resetConnections(); })
+                .on("click", function(event, d) { showResearcherSidebar(d); });
+
+            researcherNodes.append("circle").attr("class", "node-circle").attr("cx", d => d.x).attr("cy", d => d.y).attr("r", 6).attr("fill", "#495057");
+            researcherNodes.append("text").attr("class", "node-label").attr("x", d => d.x + 15).attr("y", d => d.y).attr("text-anchor", "start")
+                .each(function(d) {
+                    const lines = wrapText(d.name, 140);
+                    const text = d3.select(this);
+                    lines.forEach((line, i) => {
+                        text.append("tspan").attr("x", d.x + 15).attr("dy", i === 0 ? -((lines.length - 1) * 7) : 14).text(line);
+                    });
+                });
+
+            window.currentLines = lines;
+        }
+
+        function highlightConnections(id, type) {
+            window.currentLines.classed("active", function(d) {
+                return type === 'project' ? d.projectId === id : d.researcherId === id;
+            }).classed("inactive", function(d) {
+                return type === 'project' ? d.projectId !== id : d.researcherId !== id;
+            });
+        }
+
+        function resetConnections() {
+            if (window.currentLines) {
+                window.currentLines.classed("active", false).classed("inactive", false);
+            }
+        }
+
+        function updateActiveHighlight() {
+            if (activeItemId && window.currentLines) {
+                const type = activeItemId.startsWith('proj_') ? 'project' : 'researcher';
+                const id = activeItemId.replace('proj_', '').replace('res_', '');
+                highlightConnections(id, type);
+            }
+        }
+
+        function showProjectSidebar(project) {
+            activeItemId = 'proj_' + project.id;
+            highlightConnections(project.id, 'project');
+            document.getElementById('sidebar-image').src = project.image;
+            document.getElementById('sidebar-title').textContent = project.name;
+            document.getElementById('sidebar-subtitle').textContent = `Tahun: ${project.year}`;
+            document.getElementById('detail-section').innerHTML = `<div class="info-label">Detail Project</div><div class="info-value">${project.detail}</div>`;
+            const researcherTags = project.researchers.map(rId => {
+                const r = allData.researchers.find(res => res.id === rId);
+                return r ? `<span class="tag" onclick="openResearcherFromTag('${r.id}')">${r.name}</span>` : '';
+            }).join('');
+            document.getElementById('related-section').innerHTML = `<div class="info-label">Peneliti Terlibat</div><div>${researcherTags || '<span style="color:#999;">Tidak ada data peneliti</span>'}</div>`;
+            document.getElementById('sidebar').classList.add('active');
+        }
+
+        function showResearcherSidebar(researcher) {
+            activeItemId  = 'res_' + researcher.id;
+            highlightConnections(researcher.id, 'researcher');
+            document.getElementById('sidebar-image').src = researcher.image;
+            document.getElementById('sidebar-title').textContent = researcher.name;
+            document.getElementById('sidebar-subtitle').textContent = researcher.position;
+            document.getElementById('detail-section').innerHTML = `<div class="info-label">Keahlian</div><div class="info-value">${researcher.expertise}</div>`;
+            const projectTags = researcher.projects.map(pId => {
+                const p = allData.projects.find(proj => proj.id === pId);
+                return p ? `<span class="tag" onclick="openProjectFromTag('${p.id}')">${p.name}</span>` : '';
+            }).join('');
+            document.getElementById('related-section').innerHTML = `<div class="info-label">Project yang Ditangani</div><div>${projectTags || '<span style="color:#999;">Tidak ada project terkait</span>'}</div>`;
+            document.getElementById('sidebar').classList.add('active');
+        }
+
+        function openResearcherFromTag(researcherId) {
+            const researcher = allData.researchers.find(r => r.id === researcherId);
+            if (researcher) showResearcherSidebar(researcher);
+        }
+
+        function openProjectFromTag(projectId) {
+            const project = allData.projects.find(p => p.id === projectId);
+            if (project) showProjectSidebar(project);
+        }
+
+        function closeSidebar() {
+            activeItemId = null;
+            resetConnections();
+            document.getElementById('sidebar').classList.remove('active');
+        }
+
+        let resizeTimeout;
+        window.addEventListener('resize', function() {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(function() {
+                renderChart();
+                updateActiveHighlight();
+            }, 250);
+        });
+
+        // Load data saat page load
+        document.addEventListener('DOMContentLoaded', loadData);
+    </script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #ffffff;
+            color: #1a1a1a;
+            overflow: hidden;
+        }
+
+        .main-wrapper {
+            display: flex;
+            width: 100%;
+            height: 100%;
+            flex-direction: column;
+        }
+
+        .header {
+            background: #ffffff;
+            padding: 28px 40px;
+            border-bottom: 1px solid #ececec;
+            flex-shrink: 0;
+        }
+
+        h1 {
+            font-size: 32px;
+            color: #c92a2a;
+            margin-bottom: 20px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .api-status {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 15px;
+            padding: 8px 12px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            display: inline-block;
+        }
+
+        .api-status.loading {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .api-status.success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .api-status.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .controls {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+
+        select {
+            padding: 11px 14px;
+            border: 1px solid #d4d4d4;
+            border-radius: 6px;
+            font-size: 14px;
+            color: #333333;
+            background: white url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23666666' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e") no-repeat right 10px center;
+            background-size: 16px;
+            padding-right: 38px;
+            transition: all 0.2s ease;
+            outline: none;
+            cursor: pointer;
+            min-width: 180px;
+            font-weight: 500;
+            appearance: none;
+        }
+
+        select:hover {
+            border-color: #c92a2a;
+            box-shadow: 0 2px 8px rgba(201, 42, 42, 0.08);
+        }
+
+        select:focus {
+            border-color: #c92a2a;
+            box-shadow: 0 0 0 3px rgba(201, 42, 42, 0.1);
+        }
+
+        .search-container {
+            flex: 1;
+            position: relative;
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #888888;
+            width: 18px;
+            height: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 11px 14px 11px 44px;
+            border: 1px solid #d4d4d4;
+            border-radius: 6px;
+            font-size: 14px;
+            color: #333333;
+            background: white;
+            transition: all 0.2s ease;
+            outline: none;
+            font-weight: 500;
+            font-family: 'Inter', sans-serif;
+        }
+
+        input[type="text"]::placeholder {
+            color: #999999;
+        }
+
+        input[type="text"]:hover {
+            border-color: #c92a2a;
+            box-shadow: 0 2px 8px rgba(201, 42, 42, 0.08);
+        }
+
+        input[type="text"]:focus {
+            border-color: #c92a2a;
+            box-shadow: 0 0 0 3px rgba(201, 42, 42, 0.1);
+        }
+
+        .content-wrapper {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .chart-section {
+            flex: 1;
+            padding: 40px;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        .chart-section::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .chart-section::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .chart-section::-webkit-scrollbar-thumb {
+            background: #d4d4d4;
+            border-radius: 4px;
+        }
+
+        .chart-section::-webkit-scrollbar-thumb:hover {
+            background: #999999;
+        }
+
+        #chart-container {
+            width: 100%;
+            min-height: 600px;
+            position: relative;
+        }
+
+        .node-label {
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+            transition: all 0.2s ease;
+        }
+
+        .node-label:hover {
+            font-weight: 600;
+            fill: #c92a2a;
+        }
+
+        .node-circle {
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .node-circle:hover {
+            r: 8;
+            fill: #c92a2a;
+        }
+
+        .connection-line {
+            stroke: #c92a2a;
+            stroke-width: 1.5;
+            opacity: 0.25;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .connection-line.active {
+            stroke: #c92a2a;
+            stroke-width: 3;
+            opacity: 1;
+        }
+
+        .connection-line.inactive {
+            opacity: 0.06;
+        }
+
+        .column-header {
+            font-size: 12px;
+            font-weight: 700;
+            fill: #666666;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+        }
+
+        .sidebar {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: 480px;
+            height: 100%;
+            background: #ffffff;
+            border-left: 1px solid #ececec;
+            transform: translateX(100%);
+            transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 1000;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        .sidebar::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .sidebar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .sidebar::-webkit-scrollbar-thumb {
+            background: #d4d4d4;
+            border-radius: 4px;
+        }
+
+        .sidebar.active {
+            transform: translateX(0);
+        }
+
+        .sidebar-header {
+            padding: 28px 32px;
+            border-bottom: 1px solid #ececec;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            background: #ffffff;
+            z-index: 10;
+        }
+
+        .close-btn {
+            width: 40px;
+            height: 40px;
+            border: none;
+            background: #f5f5f5;
+            color: #666666;
+            border-radius: 6px;
+            font-size: 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .close-btn:hover {
+            background: #c92a2a;
+            color: white;
+            transform: rotate(90deg);
+        }
+
+        .sidebar-content {
+            padding: 32px;
+        }
+
+        .sidebar-image {
+            width: 160px;
+            height: 160px;
+            border-radius: 50%;
+            object-fit: cover;
+            margin: 0 auto 28px;
+            display: block;
+            border: 3px solid #c92a2a;
+        }
+
+        .sidebar-title {
+            font-size: 28px;
+            color: #c92a2a;
+            margin-bottom: 8px;
+            text-align: center;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+
+        .sidebar-subtitle {
+            font-size: 14px;
+            color: #666666;
+            text-align: center;
+            margin-bottom: 32px;
+            font-weight: 500;
+        }
+
+        .info-section {
+            margin-bottom: 32px;
+        }
+
+        .info-label {
+            font-size: 11px;
+            color: #999999;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 12px;
+            font-weight: 700;
+        }
+
+        .info-value {
+            font-size: 15px;
+            color: #333333;
+            line-height: 1.6;
+            font-weight: 400;
+        }
+
+        .tag {
+            display: inline-block;
+            background: #fff5f5;
+            color: #c92a2a;
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-right: 8px;
+            margin-bottom: 8px;
+            border: 1px solid #ffc9c9;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .tag:hover {
+            background: #c92a2a;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(201, 42, 42, 0.25);
+        }
+
+        .divider {
+            height: 1px;
+            background: #ececec;
+            margin: 32px 0;
+        }
+
+        .no-results {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999999;
+        }
+
+        .no-results-icon {
+            font-size: 56px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        .no-results-text {
+            font-size: 15px;
+            font-weight: 500;
+            color: #666666;
+        }
+
+        @media (max-width: 1400px) {
+            .sidebar {
+                width: 420px;
+            }
+
+            .chart-section {
+                padding: 30px;
+            }
+        }
+
+        @media (max-width: 1024px) {
+            .sidebar {
+                width: 100%;
+            }
+
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            select {
+                width: 100%;
+            }
+
+            .search-container {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="main-wrapper">
+        <div class="header">
+            <h1>Dashboard Visualisasi Project</h1>
+            <div id="apiStatus" class="api-status loading">🔄 Memuat data dari database...</div>
+            <div class="controls">
+            <select id="yearFilter" onchange="filterData()" aria-label="Filter berdasarkan tahun">
+                <option value="all">Semua Tahun</option> 
+            </select>
+                <div class="search-container">
+                    <svg class="search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <path d="m21 21-4.35-4.35"></path>
+                    </svg>
+                    <input type="text" id="searchInput" placeholder="Cari nama project atau peneliti..." oninput="filterData()">
+                </div>
+            </div>
+        </div>
+
+        <div class="content-wrapper">
+            <div class="chart-section" id="chartSection">
+                <div id="chart-container"></div>
+            </div>
+
+            <div class="sidebar" id="sidebar">
+                <div class="sidebar-header">
+                    <div></div>
+                    <button class="close-btn" onclick="closeSidebar()">×</button>
+                </div>
+                <div class="sidebar-content">
+                    <img id="sidebar-image" class="sidebar-image" src="" alt="Photo">
+                    <h2 class="sidebar-title" id="sidebar-title"></h2>
+                    <p class="sidebar-subtitle" id="sidebar-subtitle"></p>
+                    <div class="divider"></div>
+                    <div class="info-section" id="detail-section"></div>
+                    <div class="info-section" id="related-section"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
